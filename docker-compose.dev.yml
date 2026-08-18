@@ -1,0 +1,33 @@
+# docker-compose.dev.yml
+# Dev override: bind-mounts source for hot-reload on both services.
+# Run together with the base file:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/alembic.ini:/app/alembic.ini
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-revvy_user}:${POSTGRES_PASSWORD:-revvy_password}@postgres:5432/${POSTGRES_DB:-revvy}
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # Build only the Node "build" stage (skip the nginx runtime stage) so
+      # the dev container has npm/node available to run the Vite dev server.
+      target: build
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}

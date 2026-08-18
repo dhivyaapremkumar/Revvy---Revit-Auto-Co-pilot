@@ -1,0 +1,6 @@
+title: Chat
+tooltip: >
+  Chat with the REVVY AI copilot. Opens/continues a chat session and shows
+  the running conversation history, backed by the same /chat endpoints used
+  by the web dashboard.
+author: REVVY

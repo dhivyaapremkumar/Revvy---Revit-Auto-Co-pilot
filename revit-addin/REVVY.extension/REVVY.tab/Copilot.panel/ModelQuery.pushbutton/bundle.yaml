@@ -1,0 +1,5 @@
+title: Model Query
+tooltip: >
+  Ask a natural-language question about the currently open Revit model.
+  Strictly read-only: never opens a Transaction or modifies the document.
+author: REVVY

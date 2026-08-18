@@ -1,0 +1,60 @@
+# docker-compose.yml
+# Base (production-like) stack for REVVY: postgres (pgvector) + backend + frontend.
+#
+# Usage:
+#   docker-compose up -d --build
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up   # dev, hot-reload
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: revvy_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-revvy_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-revvy_password}
+      POSTGRES_DB: ${POSTGRES_DB:-revvy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-revvy_user} -d ${POSTGRES_DB:-revvy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: revvy_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Overrides any DATABASE_URL from .env so the backend always talks to
+      # the "postgres" service on the compose network, not localhost.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-revvy_user}:${POSTGRES_PASSWORD:-revvy_password}@postgres:5432/${POSTGRES_DB:-revvy}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    container_name: revvy_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:
+    driver: local

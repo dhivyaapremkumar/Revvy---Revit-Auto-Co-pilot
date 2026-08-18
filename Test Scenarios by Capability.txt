@@ -1,0 +1,79 @@
+Test Scenarios by Capability
+
+1. Web dashboard — Chat & Code-RAG
+
+- Basic chat: Ask a generic Revit question ("how do I create a wall type override in Revit?") — should get a normal LLM answer, no citations needed.
+- Code-RAG calculation: "FSI for a 40×50 ft plot with 30 ft road width" — should identify the governing table, show the arithmetic, cite the clause (not just quote a number).
+- Follow-up context: After the FSI answer, ask "what if the road were 15m instead?" — should carry plot-size context forward without you repeating it.
+- Ambiguity handling: Ask something that depends on building category/height (e.g. a setback rule that differs for high-rise vs. low-rise) — check whether it asks a clarifying question or assumes (this is the known open gap — worth re-confirming where it currently lands).
+- No-match case: Ask something not in TNCDBR at all (e.g. "what's the fire code in Chennai for hospitals over 45m?" if not ingested) — should say "not found in ingested code," never fabricate.
+- Session history: Start a new chat, send a few messages, refresh the page — history should persist; switch sessions from the sidebar.
+
+2. Voice agent — wake word & turn-taking
+
+- Wake word trigger: Say "hey jarvis," confirm it responds (state goes idle → listening → thinking → speaking).
+- Natural pause mid-sentence: Start a sentence, pause ~1s mid-thought, keep talking — it should not jump in early (tests the 700ms grace period).
+- Hard stop: Mid-response, say "stop" — audio should cut immediately, state goes idle right away, no LLM round-trip delay.
+- Idle timeout: Trigger a conversation, go silent — after 10s it should drop back to standby (needs the wake word again).
+- 6-turn cap: Have 6 back-and-forth exchanges in one session — on the 6th, it should announce the session limit and go idle, requiring the wake word again for turn 7.
+
+3. Voice agent — RevitMCP tools (needs Revit open with a model)
+
+- Model read: Ask "what's the current view called?" or similar — exercises a RevitMCP read tool.
+- Model write: Ask it to place a family or run a specific Revit API edit — confirm it actually changes the model, not just claims to.
+- Compliance check via voice: Ask a TNCDBR question by voice — should call ask_building_code, not answer from memory (same grounding rule as web chat).
+- Model QA: Ask "run a QA check on the model" — exercises run_model_qa (naming, missing tags, stray CAD links, unresolved warnings).
+- Architecture graph: Say "show me the architecture" / "how are you connected" — toggles the graph overlay; ask again to close it.
+
+4. Voice agent — Text mode toggle (just built, not yet tested live)
+
+- Switch to Text mode via the new dashboard toggle — mic should visibly stop (no wake-word response even if you say it).
+- Type a question — should get a text-only reply, no audio playback.
+- Switch back to Voice mode — wake word should start responding again within ~1s.
+
+5. Voice agent — error visibility & cost
+
+- Quota exhaustion: If credits run low, deliberately test this only if safe to — should show a visible "out of credits" status, not fail silently.
+- Token logging: Watch the console during a multi-turn conversation — confirm Tokens this reply: X in / Y out prints per turn and the running total looks sane.
+- Dashboard sync: While talking to the voice agent, watch the embedded dashboard's status card — the orb/state label should track idle/listening/thinking/speaking live.
+
+6. pyRevit add-in
+
+- Open the Chat panel inside Revit, send a message — confirms the add-in's per-user token auth against the backend.
+- Open Model Query panel, run a read-only query — confirm it never mutates the model.
+
+Test Prompts — Ready to Use
+
+Web dashboard — Chat & Code-RAG
+
+1. "How do I create a wall type override in Revit?"
+2. "FSI for a 40×50 ft plot with 30 ft road width?"
+3. (follow-up) "What if the road were 15m instead?"
+4. "What's the minimum setback for a residential building on a 12m road?" — check whether it asks about building category/height or assumes.
+5. "What's the fire safety code for hospitals over 45m in Chennai?" — expect "not found in ingested code."
+
+Voice agent — wake word & turn-taking
+
+6. "Hey Jarvis... what's the FSI rule in TNCDBR?" — pause mid-sentence for ~1s before finishing, confirm it waits.
+7. Mid-reply, say: "Stop."
+8. "Hey Jarvis... hello?" then go silent for 10+ seconds — confirm it goes back to standby.
+9. Six quick exchanges in a row, e.g. repeat "Hey Jarvis, what time-related... never mind, what's 2 plus 2?" style short turns — confirm the 6th ends the session.
+
+Voice agent — RevitMCP tools (Revit open, model loaded)
+
+10. "Hey Jarvis, what's the name of the current view?"
+11. "Hey Jarvis, place a door on the south wall of the ground floor."
+12. "Hey Jarvis, does a 3-meter setback comply with TNCDBR for this plot?"
+13. "Hey Jarvis, run a QA check on this model."
+14. "Hey Jarvis, show me the architecture." ... then later: "Hey Jarvis, hide the architecture."
+
+Voice agent — Text mode toggle
+
+15. Click the Text toggle, then type: "What tools do you have access to?" — expect a text reply, no audio.
+16. Say "hey jarvis" out loud while still in Text mode — expect no response.
+17. Click back to Voice, then say "Hey Jarvis, are you there?" — expect a spoken reply again.
+
+pyRevit add-in
+
+18. In the Revit Chat panel: "Summarize what this model contains."
+19. In the Model Query panel: "List all levels in this project."

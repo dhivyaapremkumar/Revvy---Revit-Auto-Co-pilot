@@ -1,0 +1,9 @@
+{
+    "name": "REVVY",
+    "description": "AI copilot for Revit — chat assistant, read-only model query, and compliance-checked design generation against the Tamil Nadu Building Code (TNCDBR).",
+    "author": "REVVY",
+    "author_url": "https://github.com/revvy",
+    "rocket_mode_compatible": true,
+    "no_reload": false,
+    "categories": ["Copilot"]
+}

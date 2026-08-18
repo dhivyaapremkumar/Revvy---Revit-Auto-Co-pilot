@@ -1,0 +1,68 @@
+# --- Environment / secrets --------------------------------------------------
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Alembic (keep migration scripts, ignore local sqlite fallback if used)
+*.sqlite3
+
+# Code-RAG ingested document files (see app.config.CODE_DOCUMENT_UPLOAD_DIR)
+backend/uploads/
+
+# --- Node / Frontend -----------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/build/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+
+# --- Docker ------------------------------------------------------------------
+*.pid
+
+# --- IDE -----------------------------------------------------------------
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+
+# --- OS ------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs ------------------------------------------------------------------
+*.log
+logs/
+
+# --- Voice agent ---------------------------------------------------------
+voice-agent/.webview_storage/
+voice-agent/run_log.txt

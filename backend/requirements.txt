@@ -1,0 +1,51 @@
+# REVVY Backend Requirements
+# NOTE: This file is shared with DATABASE-AGENT. Merge additions here rather
+# than overwriting — do not remove DB-related pins (SQLAlchemy, psycopg2,
+# alembic, pgvector) if another agent adds them.
+
+# --- Web framework ---
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# --- Settings & validation ---
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+email-validator>=2.1.0
+python-dotenv>=1.0.0
+
+# --- Database (DATABASE-AGENT owns these; kept here so `pip install` works) ---
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+psycopg2-binary>=2.9.9
+pgvector>=0.2.5
+
+# --- Auth ---
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+# passlib 1.7.4's bcrypt backend self-test is incompatible with bcrypt>=4.1
+# (raises "password cannot be longer than 72 bytes" on its own internal
+# wrap-bug probe, unrelated to actual input length). Pin to the last known
+# good 4.0.x release until passlib cuts a fixed release.
+bcrypt==4.0.1
+python-multipart>=0.0.6
+
+# --- HTTP client (OAuth calls, external APIs) ---
+httpx>=0.26.0
+
+# --- AI / LLM ---
+openai>=1.12.0
+
+# --- Testing (BACKEND-AGENT + TEST-AGENT) ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=5.0.0
+
+# --- Lint/type-check (used in validation gates) ---
+ruff>=0.2.0
+
+# --- Code-RAG: PDF text extraction for code document ingestion ---
+pypdf>=4.0.0
+ftfy>=6.2.0
+
+# --- Auth: rate limiting for register/login (in-memory; see app/rate_limit.py) ---
+slowapi>=0.1.9

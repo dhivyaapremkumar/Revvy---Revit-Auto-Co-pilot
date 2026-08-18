@@ -1,0 +1,1 @@
+"""REVVY backend application package."""
