@@ -29,6 +29,87 @@ class RoomSpec(BaseModel):
     depth_ft: float  # extends in +y
     number: str | None = None
 
+
+_Segment = tuple[float, float, float, float, tuple[int, ...]]
+
+
+def _compute_wall_segments(rooms: list[RoomSpec]) -> list[_Segment]:
+    """Turn a list of room rectangles into a deduplicated set of wall
+    segments -- any point on the boundary shared by two rooms becomes
+    exactly ONE wall (not one per room), only the non-shared remainder of
+    an edge becomes a separate wall. Pure Python, no Revit involved, so
+    this can be (and is) unit-tested directly rather than only debugged by
+    trial-and-error against live Revit like the rest of this file's Revit
+    API quirks.
+
+    Uses a sweep-line / interval-overlay approach: group every room's 4
+    edges by the line they lie on (same axis + same coordinate), then for
+    each line, walk the sorted breakpoints from every room's interval on
+    that line and determine which room(s) cover each sub-range. A
+    sub-range covered by two rooms is their shared wall; covered by one is
+    that room's own remainder. This generalizes to partial overlaps (two
+    rooms of different depth sharing part of an edge) and to 3+ rooms
+    meeting on the same line, not just exact-duplicate whole-edge matches.
+
+    Returns (start_x, start_y, end_x, end_y, owning_room_indices) per
+    segment, where owning_room_indices says which rooms (by index into
+    `rooms`) that wall serves -- a shared wall lists both.
+    """
+    # (axis, coord, lo, hi, room_index) -- axis 'v' = vertical (constant x,
+    # spans y), 'h' = horizontal (constant y, spans x).
+    edges: list[tuple[str, float, float, float, int]] = []
+    for i, r in enumerate(rooms):
+        x0, y0, x1, y1 = r.x, r.y, r.x + r.width_ft, r.y + r.depth_ft
+        edges.append(("v", x0, y0, y1, i))
+        edges.append(("v", x1, y0, y1, i))
+        edges.append(("h", y0, x0, x1, i))
+        edges.append(("h", y1, x0, x1, i))
+
+    groups: dict[tuple[str, float], list[tuple[float, float, int]]] = {}
+    for axis, coord, lo, hi, i in edges:
+        groups.setdefault((axis, coord), []).append((lo, hi, i))
+
+    TOL = 1e-6
+    raw: list[tuple[str, float, float, float, frozenset[int]]] = []
+    for (axis, coord), intervals in groups.items():
+        points = sorted({p for lo, hi, _ in intervals for p in (lo, hi)})
+        for k in range(len(points) - 1):
+            a, b = points[k], points[k + 1]
+            if b - a < TOL:
+                continue
+            mid = (a + b) / 2.0
+            owners = frozenset(i for lo, hi, i in intervals if lo <= mid <= hi)
+            if owners:
+                raw.append((axis, coord, a, b, owners))
+
+    raw.sort(key=lambda s: (s[0], s[1], s[2]))
+    merged: list[list] = []
+    idx = 0
+    while idx < len(raw):
+        axis, coord, a, b, owners = raw[idx]
+        j = idx + 1
+        while (
+            j < len(raw)
+            and raw[j][0] == axis
+            and raw[j][1] == coord
+            and abs(raw[j][2] - b) < TOL
+            and raw[j][4] == owners
+        ):
+            b = raw[j][3]
+            j += 1
+        merged.append([axis, coord, a, b, owners])
+        idx = j
+
+    segments: list[_Segment] = []
+    for axis, coord, a, b, owners in merged:
+        owners_tuple = tuple(sorted(owners))
+        if axis == "v":
+            segments.append((coord, a, coord, b, owners_tuple))
+        else:
+            segments.append((a, coord, b, coord, owners_tuple))
+    return segments
+
+
 # execute_revit_code (RevitMCP.extension/tools/code_execution_tools.py) returns
 # EITHER the executed script's print() output (success) OR a human-readable
 # "=== ERROR DETAILS ===" block with a traceback (failure) -- see
@@ -42,6 +123,27 @@ _ERROR_PREFIX = "=== ERROR DETAILS ==="
 # for the full story of why the two more "obvious" patterns each silently
 # fail on one kind of element or the other.
 _NAME_EXPR = "DB.Element.Name.__get__({0})"
+
+# NewRoom at an unenclosed point isn't the only operation that can pop a
+# blocking Revit warning dialog instead of raising a catchable exception --
+# confirmed live 2026-08-18: creating/moving/deleting walls that overlap
+# can too, and create_wall/create_door/create_window/delete_element/
+# modify_room didn't have this suppression yet (only the tools built after
+# the original create_room discovery did), so the same
+# whole-document-hangs-until-a-human-dismisses-it failure mode was still
+# reachable through them. Every transaction-opening tool must set this.
+_SILENT_FAILURES_CLASS = (
+    "class _RevvySilentFailures(DB.IFailuresPreprocessor):\n"
+    "    def PreprocessFailures(self, failuresAccessor):\n"
+    "        for f in list(failuresAccessor.GetFailureMessages()):\n"
+    "            failuresAccessor.DeleteWarning(f)\n"
+    "        return DB.FailureProcessingResult.Continue\n"
+)
+_SET_SILENT_FAILURES = (
+    "opts = t.GetFailureHandlingOptions()\n"
+    "opts.SetFailuresPreprocessor(_RevvySilentFailures())\n"
+    "t.SetFailureHandlingOptions(opts)\n"
+)
 
 # Constructing DB.ElementId(some_int) directly is ambiguous in this Revit
 # version -- confirmed twice already this session (wall cleanup scripts,
@@ -105,9 +207,11 @@ def _hosted_family_snippet(
     would fail or place them unhosted)."""
     return (
         "import json\n"
-        "t = DB.Transaction(doc, {label!r})\n"
+        + _SILENT_FAILURES_CLASS
+        + "t = DB.Transaction(doc, {label!r})\n"
         "t.Start()\n"
-        "try:\n"
+        + _SET_SILENT_FAILURES
+        + "try:\n"
         "    walls = DB.FilteredElementCollector(doc).OfClass(DB.Wall).ToElements()\n"
         "    wall = next((w for w in walls if str(w.Id) == {wall_id!r}), None)\n"
         "    if not wall:\n"
@@ -258,9 +362,11 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
         """
         code = (
             "import json\n"
-            "t = DB.Transaction(doc, 'REVVY create_wall')\n"
+            + _SILENT_FAILURES_CLASS
+            + "t = DB.Transaction(doc, 'REVVY create_wall')\n"
             "t.Start()\n"
-            "try:\n"
+            + _SET_SILENT_FAILURES
+            + "try:\n"
             "    levels = DB.FilteredElementCollector(doc).OfClass(DB.Level).ToElements()\n"
             "    level = next((l for l in levels if {level_name_expr} == {level_name!r}), None)\n"
             "    if not level:\n"
@@ -605,12 +711,16 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
         """Delete any element by id. Deleting a wall also deletes any door/window hosted on it (Revit's own behavior)."""
         code = (
             "import json\n"
+            + _SILENT_FAILURES_CLASS
             + _FIND_ELEMENT
             + "if not el:\n"
             "    print(json.dumps({{'success': False, 'error': 'element not found', 'id': {element_id!r}}}))\n"
             "else:\n"
             "    t = DB.Transaction(doc, 'REVVY delete_element')\n"
             "    t.Start()\n"
+            "    opts = t.GetFailureHandlingOptions()\n"
+            "    opts.SetFailuresPreprocessor(_RevvySilentFailures())\n"
+            "    t.SetFailureHandlingOptions(opts)\n"
             "    try:\n"
             "        doc.Delete(el.Id)\n"
             "        t.Commit()\n"
@@ -704,7 +814,8 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
         """Rename and/or renumber an existing room -- only the fields you provide are changed."""
         code = (
             "import json\n"
-            "rooms = DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_Rooms)"
+            + _SILENT_FAILURES_CLASS
+            + "rooms = DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_Rooms)"
             ".WhereElementIsNotElementType().ToElements()\n"
             "room = next((r for r in rooms if str(r.Id) == {room_id!r}), None)\n"
             "if not room:\n"
@@ -713,6 +824,9 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
             "else:\n"
             "    t = DB.Transaction(doc, 'REVVY modify_room')\n"
             "    t.Start()\n"
+            "    opts = t.GetFailureHandlingOptions()\n"
+            "    opts.SetFailuresPreprocessor(_RevvySilentFailures())\n"
+            "    t.SetFailureHandlingOptions(opts)\n"
             "    try:\n"
             "        if {name!r}:\n"
             "            DB.Element.Name.__set__(room, {name!r})\n"
@@ -738,11 +852,14 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
         floor plan is created or none of it is (any error rolls back
         everything). All rooms use the same level_name and wall_type_name and
         height_ft; use modify_wall afterward if specific walls need a
-        different type. Rooms are NOT wall-deduplicated -- two adjacent rooms
-        sharing an edge each get their own walls there (doubled, not shared).
-        Doors/windows are not included -- add them afterward with
-        create_door/create_window using the wall_ids this returns.
+        different type. Shared edges between adjacent rooms get exactly ONE
+        wall (not one per room) -- so a wall's id can appear in more than one
+        room's wall_ids list in the result, and a room touching neighbors on
+        every side can have fewer than 4 wall_ids of its own. Doors/windows
+        are not included -- add them afterward with create_door/create_window
+        using the wall_ids this returns.
         """
+        segments = _compute_wall_segments(rooms)
         code = (
             "import json\n"
             "class _RevvySilentFailures(DB.IFailuresPreprocessor):\n"
@@ -763,27 +880,30 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
             " 'available_wall_types': [{wall_type_name_expr} for w in wtypes]}}))\n"
             "    else:\n"
             "        rooms_spec = json.loads({rooms_json!r})\n"
+            "        segments_spec = json.loads({segments_json!r})\n"
             "        t = DB.Transaction(doc, 'REVVY create_floor_plan')\n"
             "        t.Start()\n"
             "        opts = t.GetFailureHandlingOptions()\n"
             "        opts.SetFailuresPreprocessor(_RevvySilentFailures())\n"
             "        t.SetFailureHandlingOptions(opts)\n"
             "        try:\n"
+            "            wall_ids = []\n"
+            "            for seg in segments_spec:\n"
+            "                p1 = DB.XYZ(seg[0], seg[1], 0)\n"
+            "                p2 = DB.XYZ(seg[2], seg[3], 0)\n"
+            "                curve = DB.Line.CreateBound(p1, p2)\n"
+            "                wall = DB.Wall.Create(doc, curve, wtype.Id, level.Id, {height_ft!r}, 0.0, False, False)\n"
+            "                wall_ids.append(str(wall.Id))\n"
             "            results = []\n"
-            "            for r in rooms_spec:\n"
+            "            for ridx, r in enumerate(rooms_spec):\n"
             "                x, y, w, d = r['x'], r['y'], r['width_ft'], r['depth_ft']\n"
-            "                corners = [DB.XYZ(x, y, 0), DB.XYZ(x + w, y, 0), DB.XYZ(x + w, y + d, 0), DB.XYZ(x, y + d, 0)]\n"
-            "                wall_ids = []\n"
-            "                for i in range(4):\n"
-            "                    curve = DB.Line.CreateBound(corners[i], corners[(i + 1) % 4])\n"
-            "                    wall = DB.Wall.Create(doc, curve, wtype.Id, level.Id, {height_ft!r}, 0.0, False, False)\n"
-            "                    wall_ids.append(str(wall.Id))\n"
             "                room = doc.Create.NewRoom(level, DB.UV(x + w / 2.0, y + d / 2.0))\n"
             "                if r.get('name'):\n"
             "                    DB.Element.Name.__set__(room, r['name'])\n"
             "                if r.get('number'):\n"
             "                    room.Number = r['number']\n"
-            "                results.append({{'name': r.get('name'), 'wall_ids': wall_ids,"
+            "                room_wall_ids = [wall_ids[si] for si, seg in enumerate(segments_spec) if ridx in seg[4]]\n"
+            "                results.append({{'name': r.get('name'), 'wall_ids': room_wall_ids,"
             " 'room_id': str(room.Id), 'area_sqft': room.Area}})\n"
             "            t.Commit()\n"
             "            print(json.dumps({{'success': True, 'rooms': results}}))\n"
@@ -796,9 +916,140 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
             wall_type_name_expr=_NAME_EXPR.format("w"),
             wall_type_name=wall_type_name,
             rooms_json=json.dumps([r.model_dump() for r in rooms]),
+            segments_json=json.dumps([list(s) for s in segments]),
             height_ft=height_ft,
         )
         return await _run(code, "create_floor_plan")
+
+    @tool
+    async def check_room_overlaps() -> str:
+        """Return every pair of rooms whose bounding boxes overlap, with the overlap area in square feet -- empty list if none.
+
+        Use this after create_floor_plan (or any batch of room creation) to
+        catch a miscalculated layout before telling the user it's done.
+        """
+        code = (
+            "import json\n"
+            "rooms = DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_Rooms)"
+            ".WhereElementIsNotElementType().ToElements()\n"
+            "boxes = []\n"
+            "for r in rooms:\n"
+            "    bbox = r.get_BoundingBox(None)\n"
+            "    if bbox:\n"
+            "        boxes.append((str(r.Id), bbox.Min.X, bbox.Min.Y, bbox.Max.X, bbox.Max.Y))\n"
+            "overlaps = []\n"
+            "for i in range(len(boxes)):\n"
+            "    for j in range(i + 1, len(boxes)):\n"
+            "        id_a, ax0, ay0, ax1, ay1 = boxes[i]\n"
+            "        id_b, bx0, by0, bx1, by1 = boxes[j]\n"
+            "        ox = min(ax1, bx1) - max(ax0, bx0)\n"
+            "        oy = min(ay1, by1) - max(ay0, by0)\n"
+            "        if ox > 0 and oy > 0:\n"
+            "            overlaps.append({'room_a_id': id_a, 'room_b_id': id_b, 'overlap_sqft': ox * oy})\n"
+            "print(json.dumps({'overlaps': overlaps}))\n"
+        )
+        return await _run(code, "check_room_overlaps")
+
+    @tool
+    async def check_wall_connections() -> str:
+        """Return wall endpoints that don't connect to any other wall (dangling_endpoints), and wall pairs occupying the same line (duplicate_wall_pairs).
+
+        Dangling endpoints usually mean a gap in the wall network. Duplicate
+        pairs are create_floor_plan's known simplification -- adjacent rooms
+        aren't wall-deduplicated, so a shared edge gets two walls instead of
+        one -- surfaced explicitly rather than left silent in the model.
+        """
+        code = (
+            "import json\n"
+            "TOL = 0.1\n"
+            "def close(ax, ay, bx, by):\n"
+            "    return abs(ax - bx) <= TOL and abs(ay - by) <= TOL\n"
+            "walls = DB.FilteredElementCollector(doc).OfClass(DB.Wall).ToElements()\n"
+            "wall_lines = {}\n"
+            "for w in walls:\n"
+            "    try:\n"
+            "        c = w.Location.Curve\n"
+            "        p0, p1 = c.GetEndPoint(0), c.GetEndPoint(1)\n"
+            "        wall_lines[str(w.Id)] = (p0.X, p0.Y, p1.X, p1.Y)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "ids = list(wall_lines.keys())\n"
+            "endpoints = []\n"
+            "for wid in ids:\n"
+            "    x0, y0, x1, y1 = wall_lines[wid]\n"
+            "    endpoints.append((wid, x0, y0))\n"
+            "    endpoints.append((wid, x1, y1))\n"
+            "dangling = []\n"
+            "for i in range(len(endpoints)):\n"
+            "    wid, x, y = endpoints[i]\n"
+            "    matched = False\n"
+            "    for j in range(len(endpoints)):\n"
+            "        wid2, x2, y2 = endpoints[j]\n"
+            "        if wid2 != wid and close(x, y, x2, y2):\n"
+            "            matched = True\n"
+            "            break\n"
+            "    if not matched:\n"
+            "        dangling.append({'wall_id': wid, 'point': [x, y]})\n"
+            "dup_pairs = []\n"
+            "for i in range(len(ids)):\n"
+            "    for j in range(i + 1, len(ids)):\n"
+            "        ax0, ay0, ax1, ay1 = wall_lines[ids[i]]\n"
+            "        bx0, by0, bx1, by1 = wall_lines[ids[j]]\n"
+            "        same = (close(ax0, ay0, bx0, by0) and close(ax1, ay1, bx1, by1))"
+            " or (close(ax0, ay0, bx1, by1) and close(ax1, ay1, bx0, by0))\n"
+            "        if same:\n"
+            "            dup_pairs.append([ids[i], ids[j]])\n"
+            "print(json.dumps({'dangling_endpoints': dangling, 'duplicate_wall_pairs': dup_pairs}))\n"
+        )
+        return await _run(code, "check_wall_connections")
+
+    @tool
+    async def check_building_coverage() -> str:
+        """Return the plot area, building footprint, and coverage ratio (facts only -- never says whether that complies with TNCDBR).
+
+        Pair with ask_building_code (for the actual coverage/FSI limit) and
+        compare them yourself, same as check_setbacks. Errors clearly if no
+        plot boundary is set (call create_property_line first) or no walls
+        exist yet.
+        """
+        code = (
+            "import json\n"
+            "boundary_pts = []\n"
+            "prop_lines = DB.FilteredElementCollector(doc).OfClass(DB.PropertyLine).ToElements()\n"
+            "for e in prop_lines:\n"
+            "    for loop in e.GetBoundary():\n"
+            "        for curve in loop:\n"
+            "            boundary_pts.append(curve.GetEndPoint(0))\n"
+            "            boundary_pts.append(curve.GetEndPoint(1))\n"
+            "if not boundary_pts:\n"
+            "    print(json.dumps({'error': 'no plot boundary set -- call create_property_line first'}))\n"
+            "else:\n"
+            "    walls = DB.FilteredElementCollector(doc).OfClass(DB.Wall).ToElements()\n"
+            "    wall_pts = []\n"
+            "    for w in walls:\n"
+            "        try:\n"
+            "            c = w.Location.Curve\n"
+            "            wall_pts.append(c.GetEndPoint(0))\n"
+            "            wall_pts.append(c.GetEndPoint(1))\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    if not wall_pts:\n"
+            "        print(json.dumps({'error': 'no walls in the model to measure building coverage from'}))\n"
+            "    else:\n"
+            "        plot_min_x = min(p.X for p in boundary_pts)\n"
+            "        plot_max_x = max(p.X for p in boundary_pts)\n"
+            "        plot_min_y = min(p.Y for p in boundary_pts)\n"
+            "        plot_max_y = max(p.Y for p in boundary_pts)\n"
+            "        plot_area = (plot_max_x - plot_min_x) * (plot_max_y - plot_min_y)\n"
+            "        bldg_min_x = min(p.X for p in wall_pts)\n"
+            "        bldg_max_x = max(p.X for p in wall_pts)\n"
+            "        bldg_min_y = min(p.Y for p in wall_pts)\n"
+            "        bldg_max_y = max(p.Y for p in wall_pts)\n"
+            "        bldg_area = (bldg_max_x - bldg_min_x) * (bldg_max_y - bldg_min_y)\n"
+            "        print(json.dumps({'plot_area_sqft': plot_area, 'building_footprint_sqft': bldg_area,"
+            " 'coverage_ratio': bldg_area / plot_area}))\n"
+        )
+        return await _run(code, "check_building_coverage")
 
     return [
         get_levels,
@@ -819,4 +1070,7 @@ def build_revit_tools(execute_code: BaseTool) -> list[BaseTool]:
         modify_wall,
         modify_room,
         create_floor_plan,
+        check_room_overlaps,
+        check_wall_connections,
+        check_building_coverage,
     ]
